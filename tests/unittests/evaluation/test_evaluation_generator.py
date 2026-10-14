@@ -207,6 +207,50 @@ class TestConvertEventsToEvalInvocation:
     assert invocations[1].user_content.parts[0].text == "How are you?"
     assert invocations[1].final_response.parts[0].text == "I am fine."
 
+  def test_turn_that_resumes_a_paused_invocation_is_its_own_invocation(
+      self,
+  ):
+    """A function-response turn resuming a paused invocation stays a turn."""
+    confirmation = types.FunctionCall(
+        id="fc1", name="adk_request_confirmation", args={}
+    )
+    answer = types.FunctionResponse(
+        id="fc1", name="adk_request_confirmation", response={"confirmed": True}
+    )
+    events = [
+        _build_event("user", [types.Part(text="Place the order")], "inv1"),
+        _build_event("agent", [types.Part(function_call=confirmation)], "inv1"),
+        _build_event("user", [types.Part(function_response=answer)], "inv1"),
+        _build_event("agent", [types.Part(text="Order placed.")], "inv1"),
+        _build_event("user", [types.Part(text="Thanks")], "inv2"),
+        _build_event("agent", [types.Part(text="You are welcome.")], "inv2"),
+    ]
+
+    invocations = EvaluationGenerator.convert_events_to_eval_invocations(events)
+
+    assert [i.invocation_id for i in invocations] == ["inv1", "inv1", "inv2"]
+    assert invocations[0].user_content.parts[0].text == "Place the order"
+    assert invocations[0].final_response is None
+    assert get_all_tool_calls(invocations[0].intermediate_data) == [
+        confirmation
+    ]
+    assert invocations[1].user_content.parts[0].function_response == answer
+    assert invocations[1].final_response.parts[0].text == "Order placed."
+    assert invocations[2].final_response.parts[0].text == "You are welcome."
+
+  def test_consecutive_user_events_stay_one_turn(self):
+    """Several user events before any reply belong to the same turn."""
+    events = [
+        _build_event("user", [types.Part(text="Hel")], "inv1"),
+        _build_event("user", [types.Part(text="Hello")], "inv1"),
+        _build_event("agent", [types.Part(text="Hi there!")], "inv1"),
+    ]
+
+    invocations = EvaluationGenerator.convert_events_to_eval_invocations(events)
+
+    assert len(invocations) == 1
+    assert invocations[0].user_content.parts[0].text == "Hello"
+
   def test_multi_agent(
       self,
   ):
