@@ -987,12 +987,10 @@ class EvaluationGenerator:
         afterwards -- so a caller converting stored events leaves this unset and
         the invocations carry no timing.
     """
-    events_by_invocation_id = (
-        EvaluationGenerator._collect_events_by_invocation_id(events)
-    )
-
     invocations = []
-    for invocation_id, events in events_by_invocation_id.items():
+    for invocation_id, events in EvaluationGenerator._collect_events_by_turn(
+        events
+    ):
       final_response: Optional[Content] = None
       final_event: Optional[Event] = None
       user_content = Content(parts=[])
@@ -1141,6 +1139,36 @@ class EvaluationGenerator:
       normalized.append(rewritten)
 
     return normalized
+
+  @staticmethod
+  def _collect_events_by_turn(
+      events: list[Event],
+  ) -> list[tuple[str, list[Event]]]:
+    """Groups events into user turns, each paired with its invocation id.
+
+    A turn usually is one invocation. A turn that answers a paused invocation
+    (its user content is a function response, such as a tool confirmation or a
+    long-running tool result) resumes that invocation, so its events reuse the
+    paused invocation's id. Grouping by invocation id alone would fold the
+    answer into the turn it answers and leave fewer inferences than the eval
+    case has conversation turns. A user event that follows a non-user event in
+    the same invocation therefore starts a new turn; consecutive user events,
+    such as live input transcriptions, stay in one turn.
+    """
+    turns: list[tuple[str, list[Event]]] = []
+    for event in events:
+      is_user = (event.author or _DEFAULT_AUTHOR).lower() == _USER_AUTHOR
+      if turns:
+        invocation_id, turn_events = turns[-1]
+        answered = any(
+            (e.author or _DEFAULT_AUTHOR).lower() != _USER_AUTHOR
+            for e in turn_events
+        )
+        if event.invocation_id == invocation_id and not (is_user and answered):
+          turn_events.append(event)
+          continue
+      turns.append((event.invocation_id, [event]))
+    return turns
 
   @staticmethod
   def _collect_events_by_invocation_id(
