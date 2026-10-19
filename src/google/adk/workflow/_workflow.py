@@ -734,11 +734,26 @@ class Workflow(BaseNode):
     )
 
   async def _maybe_reemit_replayed_output(
-      self, child_ctx: Context, ctx: Context
+      self,
+      child_ctx: Context,
+      ctx: Context,
+      recovered: _ChildScanState | None,
   ) -> None:
-    """Re-surface a fast-forwarded node's output on a resumable stream."""
+    """Record a fast-forwarded node's output that has no event yet.
+
+    A node that produced its output earlier in this invocation already has
+    that output event in the session, so fast-forwarding it records nothing.
+    Re-emitting it on every resume would make a loop that pauses on each
+    iteration store one more copy of every finished node's output per resume.
+
+    The exception is a node that completes with the reply to its interrupt as
+    its output: replay derives that output from the user's response, so it
+    has no event yet and is recorded here, once.
+    """
     ic = ctx._invocation_context
     if not ic.is_resumable or child_ctx.output is None:
+      return
+    if recovered is not None and recovered.output is not None:
       return
     from ..events.event import Event
     from ..events.event import NodeInfo
@@ -813,12 +828,18 @@ class Workflow(BaseNode):
     )
 
     # A genuine execution records a checkpoint on completion. A replayed
-    # fast-forward instead re-surfaces its recovered output so a resumable
-    # stream stays complete, without a redundant checkpoint.
+    # fast-forward only records an output the session does not hold yet, so a
+    # resumable stream stays complete, without a redundant checkpoint.
     if not replayed:
       await self._emit_node_checkpoint(loop_state, ctx)
     else:
-      await self._maybe_reemit_replayed_output(child_ctx, ctx)
+      await self._maybe_reemit_replayed_output(
+          child_ctx,
+          ctx,
+          loop_state.recovered_executions.get(
+              f"{node_name}@{node_state.run_id}"
+          ),
+      )
 
     # Buffer downstream triggers.
     self._buffer_downstream_triggers(

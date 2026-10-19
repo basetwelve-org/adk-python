@@ -553,15 +553,6 @@ async def test_parallel_worker_pauses_for_human_input(
 
   assert simplified_events2 == [
       (
-          'parallel_worker_hitl_agent@1/NodeA@1',
-          {
-              'output': [
-                  {'val': 'item1', 'ask': False},
-                  {'val': 'item2', 'ask': True},
-              ],
-          },
-      ),
-      (
           'parallel_worker_hitl_agent@1/Worker@1/Worker@2',
           {'output': 'item2_resumed'},
       ),
@@ -1008,12 +999,6 @@ async def test_parallel_worker_hitl_respects_parallel_workers_limits(
   simplified_events2 = simplify_events_with_node(events2)
   assert simplified_events2 == [
       (
-          'max_parallel_workers_hitl_agent@1/NodeA@1',
-          {
-              'output': items,
-          },
-      ),
-      (
           'max_parallel_workers_hitl_agent@1/Worker@1/Worker@2',
           {'output': 'item2_resumed'},
       ),
@@ -1046,12 +1031,6 @@ async def test_parallel_worker_hitl_respects_parallel_workers_limits(
   simplified_events3 = simplify_events_with_node(events3)
 
   assert simplified_events3 == [
-      (
-          'max_parallel_workers_hitl_agent@1/NodeA@1',
-          {
-              'output': items,
-          },
-      ),
       (
           'max_parallel_workers_hitl_agent@1/Worker@1/Worker@3',
           {'output': 'item3_resumed'},
