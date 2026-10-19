@@ -2316,3 +2316,246 @@ async def test_request_input_resume_after_earlier_invocation_completed(
       isinstance(output, str) and output.startswith('resumed:')
       for output in outputs3
   ), outputs3
+
+
+# ---------------------------------------------------------------------------
+# A loop that pauses for input on every iteration of one invocation
+# ---------------------------------------------------------------------------
+
+
+class _AskNode(BaseNode):
+  """Pauses for one answer per run.
+
+  Without `rerun_on_resume` the node completes with the reply as its output.
+  With it, the node reruns and emits the reply itself.
+  """
+
+  model_config = ConfigDict(arbitrary_types_allowed=True)
+  rerun_on_resume: bool = Field(default=False)
+
+  @override
+  async def _run_impl(
+      self, *, ctx: Context, node_input: Any
+  ) -> AsyncGenerator[Any, None]:
+    interrupt_id = f'ask:{ctx.run_id}'
+    answer = ctx.resume_inputs.get(interrupt_id)
+    if answer is None:
+      yield RequestInput(interrupt_id=interrupt_id, message='Next answer?')
+      return
+    yield Event(output=answer)
+
+
+class _ApplyNode(BaseNode):
+  """Applies one answer, then loops back for the next until `rounds`."""
+
+  model_config = ConfigDict(arbitrary_types_allowed=True)
+  rounds: int = Field(default=1)
+  received: list[Any] = Field(default_factory=list)
+
+  @override
+  async def _run_impl(
+      self, *, ctx: Context, node_input: Any
+  ) -> AsyncGenerator[Any, None]:
+    self.received.append(node_input)
+    route = 'done' if node_input['n'] >= self.rounds else 'loop'
+    yield Event(output=node_input['n'], route=route)
+
+
+def _answer_loop_app(
+    name: str, *, rounds: int, rerun_on_resume: bool, resumable: bool = True
+) -> tuple[App, _ApplyNode]:
+  """START -> ask -> apply --loop--> ask, apply --done--> finish."""
+  ask = _AskNode(name='ask', rerun_on_resume=rerun_on_resume)
+  apply = _ApplyNode(name='apply', rounds=rounds)
+  finish = _TestingNode(name='finish', message='finished')
+  agent = Workflow(
+      name='answer_loop',
+      edges=[
+          Edge(from_node=START, to_node=ask),
+          Edge(from_node=ask, to_node=apply),
+          Edge(from_node=apply, to_node=ask, route='loop'),
+          Edge(from_node=apply, to_node=finish, route='done'),
+      ],
+  )
+  app = App(
+      name=name,
+      root_agent=agent,
+      resumability_config=(
+          ResumabilityConfig(is_resumable=True) if resumable else None
+      ),
+  )
+  return app, apply
+
+
+async def _answer_every_pause(
+    runner: testing_utils.InMemoryRunner, rounds: int
+) -> list[int]:
+  """Answers each pause of the loop in one invocation.
+
+  Returns how many events each resume appended to the session.
+  """
+  events = await runner.run_async(testing_utils.get_user_content('start'))
+  invocation_id = events[0].invocation_id
+  appended = []
+  for n in range(1, rounds + 1):
+    [pause] = workflow_testing_utils.get_request_input_events(events)
+    [interrupt_id] = extract_event_interrupt_ids(pause)
+    before = len(runner.session.events)
+    events = await runner.run_async(
+        new_message=testing_utils.UserContent(
+            create_request_input_response(interrupt_id, {'n': n})
+        ),
+        invocation_id=invocation_id,
+    )
+    appended.append(len(runner.session.events) - before)
+  return appended
+
+
+@pytest.mark.parametrize('rerun_on_resume', [False, True])
+async def test_paused_loop_appends_same_number_of_events_per_resume(
+    request: pytest.FixtureRequest, rerun_on_resume: bool
+):
+  """Resuming a loop appends the same number of events every time.
+
+  Setup: ask -> apply -> ask loop that pauses on every iteration.
+  Act: answer six pauses in one invocation.
+  Assert: every resume that pauses again appends as many events as the
+    first one; the nodes fast-forwarded from earlier iterations add none.
+  """
+  rounds = 6
+  app, _ = _answer_loop_app(
+      request.function.__name__,
+      rounds=rounds,
+      rerun_on_resume=rerun_on_resume,
+  )
+  runner = testing_utils.InMemoryRunner(app=app)
+
+  appended = await _answer_every_pause(runner, rounds)
+
+  # The last resume finishes the loop instead of pausing again.
+  pausing_resumes = appended[:-1]
+  assert pausing_resumes == [pausing_resumes[0]] * (rounds - 1)
+
+
+@pytest.mark.parametrize('rerun_on_resume', [False, True])
+async def test_paused_loop_feeds_each_answer_to_its_successor_once(
+    request: pytest.FixtureRequest, rerun_on_resume: bool
+):
+  """Each answer reaches the successor exactly once across resumes."""
+  rounds = 4
+  app, apply = _answer_loop_app(
+      request.function.__name__,
+      rounds=rounds,
+      rerun_on_resume=rerun_on_resume,
+  )
+  runner = testing_utils.InMemoryRunner(app=app)
+
+  await _answer_every_pause(runner, rounds)
+
+  assert apply.received == [{'n': n} for n in range(1, rounds + 1)]
+
+
+@pytest.mark.parametrize('rerun_on_resume', [False, True])
+async def test_paused_loop_records_each_output_once_in_route_order(
+    request: pytest.FixtureRequest, rerun_on_resume: bool
+):
+  """Every node run's output is recorded once, in the order the routes ran.
+
+  Setup: ask -> apply -> ask loop of three rounds, then finish.
+  Act: answer the three pauses in one invocation.
+  Assert: the session holds one output per node run, following the
+    loop -> loop -> done routes, and the workflow ends on finish's output.
+  """
+  rounds = 3
+  app, _ = _answer_loop_app(
+      request.function.__name__,
+      rounds=rounds,
+      rerun_on_resume=rerun_on_resume,
+  )
+  runner = testing_utils.InMemoryRunner(app=app)
+
+  await _answer_every_pause(runner, rounds)
+
+  outputs = [
+      (e.node_info.path, e.output)
+      for e in runner.session.events
+      if e.output is not None
+  ]
+  assert outputs == [
+      ('answer_loop@1/ask@1', {'n': 1}),
+      ('answer_loop@1/apply@1', 1),
+      ('answer_loop@1/ask@2', {'n': 2}),
+      ('answer_loop@1/apply@2', 2),
+      ('answer_loop@1/ask@3', {'n': 3}),
+      ('answer_loop@1/apply@3', 3),
+      ('answer_loop@1/finish@1', 'finished'),
+  ]
+  routes = [
+      e.actions.route
+      for e in runner.session.events
+      if e.actions.route is not None
+  ]
+  assert routes == ['loop', 'loop', 'done']
+  assert runner.session.events[-1].actions.end_of_agent
+
+
+@pytest.mark.parametrize('rerun_on_resume', [False, True])
+async def test_paused_loop_resumes_after_restart_on_database_session_service(
+    request: pytest.FixtureRequest, tmp_path, rerun_on_resume: bool
+):
+  """A loop resumes from a database after every resume restarts the process.
+
+  Setup: the ask -> apply loop on a sqlite DatabaseSessionService.
+  Act: answer each pause with a new session service, runner and workflow,
+    so each resume rebuilds its state from the stored events only.
+  Assert: every answer is applied once, the loop finishes, and each resume
+    that pauses again stores as many events as the first one.
+  """
+  from google.adk.sessions.database_session_service import DatabaseSessionService
+
+  rounds = 4
+  db_url = f'sqlite+aiosqlite:///{tmp_path / "sessions.db"}'
+  applied = []
+
+  async def run_turn(**kwargs) -> tuple[list[Event], int]:
+    app, apply = _answer_loop_app(
+        request.function.__name__,
+        rounds=rounds,
+        rerun_on_resume=rerun_on_resume,
+    )
+    async with DatabaseSessionService(db_url=db_url) as session_service:
+      runner = Runner(app=app, session_service=session_service)
+      events = [e async for e in runner.run_async(user_id='u', **kwargs)]
+      session = await session_service.get_session(
+          app_name=app.name, user_id='u', session_id=kwargs['session_id']
+      )
+    applied.extend(apply.received)
+    return events, len(session.events)
+
+  async with DatabaseSessionService(db_url=db_url) as session_service:
+    session = await session_service.create_session(
+        app_name=request.function.__name__, user_id='u'
+    )
+  events, stored = await run_turn(
+      session_id=session.id,
+      new_message=testing_utils.get_user_content('start'),
+  )
+  invocation_id = events[0].invocation_id
+  appended = []
+  for n in range(1, rounds + 1):
+    [pause] = workflow_testing_utils.get_request_input_events(events)
+    [interrupt_id] = extract_event_interrupt_ids(pause)
+    events, now_stored = await run_turn(
+        session_id=session.id,
+        invocation_id=invocation_id,
+        new_message=testing_utils.UserContent(
+            create_request_input_response(interrupt_id, {'n': n})
+        ),
+    )
+    appended.append(now_stored - stored)
+    stored = now_stored
+
+  assert applied == [{'n': n} for n in range(1, rounds + 1)]
+  assert [e.output for e in events if e.output is not None][-1] == 'finished'
+  pausing_resumes = appended[:-1]
+  assert pausing_resumes == [pausing_resumes[0]] * (rounds - 1)

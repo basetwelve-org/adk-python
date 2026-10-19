@@ -27,6 +27,7 @@ from google.adk.apps.app import App
 from google.adk.apps.app import ResumabilityConfig
 from google.adk.events._interrupts import extract_event_interrupt_ids
 from google.adk.events.event import Event
+from google.adk.events.request_input import RequestInput
 from google.adk.plugins.base_plugin import BasePlugin
 # Added for the moved test
 from google.adk.runners import Runner
@@ -1723,3 +1724,82 @@ async def test_failed_node_in_nested_workflow_reruns_on_resume(
   assert inner_flaky_runs == 2
   assert inner_downstream_inputs == ['inner output']
   assert outer_upstream_runs == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_node_in_paused_loop_reruns_on_resume(
+    request: pytest.FixtureRequest,
+):
+  """A node that fails late in a loop that pauses every iteration reruns.
+
+  Setup: ask -> apply --loop--> ask, --done--> finish. ask pauses for an
+    answer on every iteration; apply raises on its first attempt at the
+    second answer.
+  Act:
+    - Answer the first pause, then the second; apply fails.
+    - Resume without a message, then answer the third pause.
+  Assert: apply reruns with the second answer, the first iteration is
+    fast-forwarded rather than run again, and the loop finishes.
+  """
+  apply_attempts = []
+
+  class _AskNode(BaseNode):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    @override
+    async def _run_impl(
+        self, *, ctx: Context, node_input: Any
+    ) -> AsyncGenerator[Any, None]:
+      yield RequestInput(interrupt_id=f'ask:{ctx.run_id}', message='Next?')
+
+  class _ApplyNode(BaseNode):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    @override
+    async def _run_impl(
+        self, *, ctx: Context, node_input: Any
+    ) -> AsyncGenerator[Any, None]:
+      apply_attempts.append(node_input)
+      if node_input == {'n': 2} and apply_attempts.count(node_input) == 1:
+        raise CustomError('Node failed')
+      yield Event(
+          output=node_input['n'],
+          route='done' if node_input['n'] == 3 else 'loop',
+      )
+
+  ask = _AskNode(name='ask')
+  apply = _ApplyNode(name='apply')
+  finish = TestingNode(name='finish', output='finished')
+  wf = Workflow(
+      name='test_resume_failure_in_loop',
+      edges=[
+          Edge(from_node=START, to_node=ask),
+          Edge(from_node=ask, to_node=apply),
+          Edge(from_node=apply, to_node=ask, route='loop'),
+          Edge(from_node=apply, to_node=finish, route='done'),
+      ],
+  )
+  runner = _resumable_runner(wf, request)
+
+  async def answer(events: list[Event], n: int) -> list[Event]:
+    [interrupt_id] = extract_event_interrupt_ids(
+        get_request_input_events(events)[-1]
+    )
+    return await runner.run_async(
+        new_message=testing_utils.UserContent(
+            create_request_input_response(interrupt_id, {'n': n})
+        ),
+        invocation_id=invocation_id,
+    )
+
+  events = await runner.run_async(testing_utils.get_user_content('start'))
+  invocation_id = events[0].invocation_id
+  events = await answer(events, 1)
+  with pytest.raises(CustomError, match='Node failed'):
+    await answer(events, 2)
+
+  events = await runner.run_async(invocation_id=invocation_id)
+  events = await answer(events, 3)
+
+  assert apply_attempts == [{'n': 1}, {'n': 2}, {'n': 2}, {'n': 3}]
+  assert [e.output for e in events if e.output is not None][-1] == 'finished'
