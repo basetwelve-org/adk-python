@@ -1185,7 +1185,13 @@ class UsageMetadataChunk(BaseModel):
 
 
 class LiteLLMClient:
-  """Provides acompletion method (for better testability)."""
+  """Provides native LiteLLM API calls (for better testability)."""
+
+  async def aresponses(self, **kwargs: Any) -> Any:
+    """Calls LiteLLM's native Responses API without a chat projection."""
+    from litellm import aresponses
+
+    return await aresponses(**kwargs)
 
   async def acompletion(
       self,
@@ -3794,12 +3800,20 @@ class LiteLlm(BaseLlm):
   Attributes:
     model: The name of the LiteLlm model.
     llm_client: The LLM client to use for the model.
+    use_responses_api: Retain and replay native Responses output items.
   """
 
   # LiteLLMClient has no JSON serializer, so it is excluded from dumps to keep
   # model_dump(mode="json") from raising.
   llm_client: LiteLLMClient = Field(default_factory=LiteLLMClient, exclude=True)
   """The LLM client to use for the model."""
+
+  use_responses_api: bool = False
+  """Use LiteLLM's native Responses API and persist/replay native output items.
+
+  This is opt-in for Responses-compatible providers. Opaque reasoning belongs
+  to serializable Part metadata, never text or another provider's signature.
+  """
 
   _additional_args: Dict[str, Any] = PrivateAttr(default_factory=dict)
   _cached_capabilities: tuple[tuple[str, Any], LlmCapabilities] | None = (
@@ -3811,10 +3825,11 @@ class LiteLlm(BaseLlm):
 
     Args:
       model: The name of the LiteLlm model.
-      **kwargs: Additional arguments to pass to the litellm completion api.
+      **kwargs: Additional arguments to pass to the selected LiteLLM API.
     """
     drop_params = kwargs.pop("drop_params", None)
-    super().__init__(model=model, **kwargs)
+    use_responses_api = kwargs.pop("use_responses_api", False)
+    super().__init__(model=model, use_responses_api=use_responses_api, **kwargs)
     # Warn if using Gemini via LiteLLM
     _warn_gemini_via_litellm(model, kwargs)
     self._additional_args = dict(kwargs)
@@ -3955,6 +3970,12 @@ class LiteLlm(BaseLlm):
 
     self._maybe_append_user_content(llm_request)
     _append_fallback_user_content_if_missing(llm_request)
+    if self.use_responses_api:
+      from ._lite_llm_responses import generate_content
+
+      async for response in generate_content(self, llm_request, stream=stream):
+        yield response
+      return
     if logger.isEnabledFor(logging.DEBUG):
       logger.debug(_build_request_log(llm_request))
 

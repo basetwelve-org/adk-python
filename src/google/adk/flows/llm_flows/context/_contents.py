@@ -29,6 +29,7 @@ from ....events._branch_path import _BranchPath
 from ....events._node_path_builder import _NodePathBuilder
 from ....events._rewind_events import _apply_rewinds
 from ....events.event import Event
+from ....models._lite_llm_responses import NATIVE_RESPONSE_KEY
 from ....models.base_llm import BaseLlm
 from ....models.llm_request import LlmRequest
 from ....utils._agent_mode import AgentMode
@@ -230,6 +231,11 @@ def _is_part_invisible(
   Args:
     p: The part to check.
   """
+  # A reasoning-only native response can carry no display text. Its complete
+  # output array is still model context and must survive event-store replay.
+  if isinstance((p.part_metadata or {}).get(NATIVE_RESPONSE_KEY), dict):
+    return False
+
   # Function calls and responses are never invisible, even if marked as thought
   if p.function_call or p.function_response:
     return False
