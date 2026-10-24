@@ -2040,6 +2040,7 @@ class SkillToolset(BaseToolset):
       tool_name_prefix: str | None = None,
       tool_filter: ToolPredicate | list[str] | None = None,
       discovery_mode: SkillDiscoveryMode = SkillDiscoveryMode.LAZY,
+      instruction: str | None = None,
       lifecycle_config: SkillLifecycleConfig | None = None,
   ):
     """Initializes the SkillToolset.
@@ -2066,6 +2067,9 @@ class SkillToolset(BaseToolset):
       discovery_mode: How the local catalog reaches the model. Defaults to
         `LAZY`, where it calls `list_skills`. `EAGER` drops that tool and
         injects the catalog into the system instruction instead.
+      instruction: Optional replacement for the generic skill guidance. None
+        uses the SDK default; an empty string suppresses generic guidance.
+        Discovery and lifecycle behavior remain configured independently.
       lifecycle_config: How long skills stay active once loaded, how many may be
         at once, and whether they are rechecked against their definition.
         Defaults to leaving every skill active for the rest of the session,
@@ -2077,6 +2081,7 @@ class SkillToolset(BaseToolset):
     """
     super().__init__(tool_filter=tool_filter, tool_name_prefix=tool_name_prefix)
 
+    self._instruction_override = instruction
     config = lifecycle_config or SkillLifecycleConfig()
     # Copy the overrides: editing the config later must not change a session
     # already running.
@@ -2639,6 +2644,7 @@ class SkillToolset(BaseToolset):
         tool_name_prefix=self.tool_name_prefix,
         tool_filter=self.tool_filter,
         discovery_mode=self._discovery_mode,
+        instruction=self._instruction_override,
         lifecycle_config=self._lifecycle_config,
     )
 
@@ -2674,15 +2680,16 @@ class SkillToolset(BaseToolset):
         t.name for t in self._tools if self._is_tool_selected(t, tool_context)
     }
 
-    instructions = [
-        _build_skill_system_instruction(
-            prefix=self.tool_name_prefix,
-            allowed_tools=selected_core_tools,
-            skills_folder=self.skills_folder,
-            script_execution_enabled=self._offers_script_tool(tool_context),
-            unload_enabled=self._lifecycle_enabled,
-        )
-    ]
+    guidance = self._instruction_override
+    if guidance is None:
+      guidance = _build_skill_system_instruction(
+          prefix=self.tool_name_prefix,
+          allowed_tools=selected_core_tools,
+          skills_folder=self.skills_folder,
+          script_execution_enabled=self._offers_script_tool(tool_context),
+          unload_enabled=self._lifecycle_enabled,
+      )
+    instructions = [guidance] if guidance else []
 
     if self._inject_catalog(selected_core_tools):
       skills = self._list_skills()

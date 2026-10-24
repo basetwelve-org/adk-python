@@ -6133,6 +6133,37 @@ async def _instructions_for(toolset, ctx):
   return llm_req.append_instructions.call_args[0][0]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("instruction", [None, "Use relevant skills.", ""])
+@pytest.mark.parametrize(
+    "discovery_mode", list(skill_toolset.SkillDiscoveryMode)
+)
+async def test_instruction_override_preserves_discovery_tools_and_clones(
+    mock_skill1, tool_context_instance, instruction, discovery_mode
+):
+  default = skill_toolset.SkillToolset(
+      [mock_skill1], discovery_mode=discovery_mode
+  )
+  default_blocks = await _instructions_for(default, tool_context_instance)
+  expected = (
+      default_blocks
+      if instruction is None
+      else ([instruction] if instruction else []) + default_blocks[1:]
+  )
+  expected_tools = {
+      tool.name for tool in await default.get_tools(tool_context_instance)
+  }
+  toolset = skill_toolset.SkillToolset(
+      [mock_skill1], discovery_mode=discovery_mode, instruction=instruction
+  )
+
+  for view in (toolset, toolset.clone_with_updated_skills([mock_skill1])):
+    assert await _instructions_for(view, tool_context_instance) == expected
+    assert {
+        tool.name for tool in await view.get_tools(tool_context_instance)
+    } == expected_tools
+
+
 def test_content_hash_is_the_same_for_the_same_content():
   assert skill_toolset._skill_content_hash(
       _real_skill()
