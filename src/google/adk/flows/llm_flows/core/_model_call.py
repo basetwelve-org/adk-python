@@ -220,6 +220,13 @@ async def call_llm_async(
 
     # Calls the LLM.
     llm = await flow._get_llm(invocation_context)
+    if (
+        llm_request.custom_tool_declarations
+        and not llm.capabilities.custom_tools
+    ):
+      raise ValueError(
+          f'{type(llm).__name__} does not support native custom tools.'
+      )
 
     # Check if we can make this llm call or not. If the current
     # call pushes the counter beyond the max set value, then the

@@ -25,6 +25,7 @@ from pydantic import Field
 from pydantic import PrivateAttr
 
 from ..agents.context_cache_config import ContextCacheConfig
+from ..tools._custom_tool_declaration import CustomToolDeclaration
 from ..tools.base_tool import BaseTool
 from ..utils._schema_utils import SchemaType
 from ._service_tier import ServiceTier
@@ -84,6 +85,11 @@ class LlmRequest(BaseModel):
   """
   tools_dict: dict[str, BaseTool] = Field(default_factory=dict, exclude=True)
   """The tools dictionary."""
+
+  custom_tool_declarations: list[CustomToolDeclaration] = Field(
+      default_factory=list
+  )
+  """Native freeform declarations, separate from genai function JSON schemas."""
 
   cache_config: Optional[ContextCacheConfig] = None
   """Context cache configuration for this request."""
@@ -303,9 +309,13 @@ class LlmRequest(BaseModel):
       return
     declarations = []
     for tool in tools:
-      declaration = tool._get_declaration()
-      if declaration:
-        declarations.append(declaration)
+      custom_declaration = tool._get_custom_declaration()
+      declaration = None if custom_declaration else tool._get_declaration()
+      if custom_declaration or declaration:
+        if custom_declaration:
+          self.custom_tool_declarations.append(custom_declaration)
+        elif declaration is not None:
+          declarations.append(declaration)
         if tool.name in self.tools_dict:
           # Both declarations are still advertised to the model, but only one
           # tool can hold the name, so calls land on the survivor.

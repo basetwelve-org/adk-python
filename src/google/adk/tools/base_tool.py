@@ -34,6 +34,7 @@ from pydantic import BaseModel
 
 from ..utils.variant_utils import get_google_llm_variant
 from ..utils.variant_utils import GoogleLLMVariant
+from ._custom_tool_declaration import CustomToolDeclaration
 
 logger = logging.getLogger("google_adk." + __name__)
 
@@ -140,6 +141,10 @@ class BaseTool(ABC):
     self.custom_metadata = custom_metadata
     self.behavior = behavior
     self.response_scheduling = response_scheduling
+
+  def _get_custom_declaration(self) -> CustomToolDeclaration | None:
+    """Return a native freeform declaration, or None for ordinary tools."""
+    return None
 
   def _get_declaration(self) -> Optional[types.FunctionDeclaration]:
     """Gets the OpenAPI specification of this tool in the form of a FunctionDeclaration.

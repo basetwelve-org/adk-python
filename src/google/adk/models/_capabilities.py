@@ -83,3 +83,10 @@ class LlmCapabilities(BaseModel):
           )
       ),
   ] = False
+
+  custom_tools: bool = False
+  """Whether this adapter transports native freeform tool declarations/calls.
+
+  The provider still decides which models accept the requested grammar.
+  Unsupported adapters must refuse rather than silently drop declarations.
+  """

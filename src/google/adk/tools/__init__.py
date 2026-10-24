@@ -20,6 +20,10 @@ from typing import TYPE_CHECKING
 # The TYPE_CHECKING block is needed for autocomplete to work.
 if TYPE_CHECKING:
   from ..auth.auth_tool import AuthToolArguments
+  from ._custom_tool import CustomTool
+  from ._custom_tool_declaration import CustomToolDeclaration
+  from ._custom_tool_declaration import CustomToolGrammarFormat
+  from ._custom_tool_declaration import CustomToolTextFormat
   from ._remote_mcp_server import RemoteMcpServer
   from ._request_input_tool import request_input
   from .agent_tool import AgentTool
@@ -53,6 +57,19 @@ if TYPE_CHECKING:
 # party dependencies, please feel free to import it eagerly at the top of this
 # file.
 _LAZY_MAPPING = {
+    'CustomToolTextFormat': (
+        '._custom_tool_declaration',
+        'CustomToolTextFormat',
+    ),
+    'CustomToolGrammarFormat': (
+        '._custom_tool_declaration',
+        'CustomToolGrammarFormat',
+    ),
+    'CustomToolDeclaration': (
+        '._custom_tool_declaration',
+        'CustomToolDeclaration',
+    ),
+    'CustomTool': ('._custom_tool', 'CustomTool'),
     'AuthToolArguments': ('..auth.auth_tool', 'AuthToolArguments'),
     'AgentTool': ('.agent_tool', 'AgentTool'),
     'APIHubToolset': ('.apihub_tool.apihub_toolset', 'APIHubToolset'),

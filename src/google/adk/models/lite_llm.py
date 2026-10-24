@@ -58,6 +58,8 @@ from typing_extensions import override
 from typing_extensions import Required
 
 from . import _prompt_cache
+from ..tools._custom_tool import _custom_tool_call_part
+from ..tools._custom_tool import _custom_tool_input
 from ..utils import streaming_utils
 from ..utils._google_client_headers import merge_tracking_headers
 from ..utils._schema_utils import lowercase_schema_types
@@ -1080,10 +1082,23 @@ class _OutboundToolCall(TypedDict):
   extra_content: NotRequired[dict[str, dict[str, str]]]
 
 
+class _OutboundCustomToolPayload(TypedDict):
+  name: str
+  input: str
+
+
+class _OutboundCustomToolCall(TypedDict):
+  type: Literal["custom"]
+  id: str
+  custom: _OutboundCustomToolPayload
+
+
 class _AssistantMessagePayload(TypedDict):
   role: Required[Literal["assistant"]]
   content: Required[_AssistantContent]
-  tool_calls: NotRequired[list[_OutboundToolCall] | None]
+  tool_calls: NotRequired[
+      list[_OutboundToolCall | _OutboundCustomToolCall] | None
+  ]
   reasoning_content: NotRequired[str | None]
   thinking_blocks: NotRequired[list[_ThinkingBlock] | None]
 
@@ -1097,7 +1112,7 @@ class _GemmaToolMessagePayload(TypedDict):
 def _assistant_message(
     *,
     content: _AssistantContent,
-    tool_calls: list[_OutboundToolCall] | None = None,
+    tool_calls: list[_OutboundToolCall | _OutboundCustomToolCall] | None = None,
     reasoning_content: str | None = None,
     thinking_blocks: list[_ThinkingBlock] | None = None,
 ) -> Message:
@@ -1143,6 +1158,13 @@ class FunctionChunk(BaseModel):
   # Gemini signs only some calls (the first of a parallel batch), so most
   # chunks carry none.
   thought_signature: bytes | None = None
+
+
+class CustomToolChunk(BaseModel):
+  id: str | None
+  name: str | None
+  input: str | None
+  index: int | None = 0
 
 
 class TextChunk(BaseModel):
@@ -1675,7 +1697,7 @@ async def _content_to_message_param(
         content=cast(OpenAIMessageContent, message_content),
     )
   else:  # assistant/model
-    tool_calls: list[_OutboundToolCall] = []
+    tool_calls: list[_OutboundToolCall | _OutboundCustomToolCall] = []
     content_parts: list[types.Part] = []
     reasoning_parts: list[types.Part] = []
     for part in parts:
@@ -1684,6 +1706,17 @@ async def _content_to_message_param(
         if not function_call.name:
           raise ValueError("LiteLLM function calls require a name")
         tool_call_id = function_call.id or ""
+        raw_input = _custom_tool_input(part)
+        if raw_input is not None:
+          tool_calls.append(
+              _OutboundCustomToolCall(
+                  type="custom",
+                  id=tool_call_id,
+                  custom={"name": function_call.name, "input": raw_input},
+              )
+          )
+          continue
+
         tool_call_dict = _OutboundToolCall(
             type="function",
             id=tool_call_id,
@@ -2751,12 +2784,15 @@ def _function_declaration_to_tool_param(
 
 def _model_response_to_chunk(
     response: ModelResponse | ModelResponseStream,
+    *,
+    custom_tool_names: frozenset[str] = frozenset(),
 ) -> Generator[
     Tuple[
         Optional[
             Union[
                 TextChunk,
                 FunctionChunk,
+                CustomToolChunk,
                 UsageMetadataChunk,
                 ReasoningChunk,
             ]
@@ -2839,7 +2875,15 @@ def _model_response_to_chunk(
     if tool_calls:
       for idx, tool_call in enumerate(tool_calls):
         # LiteLLM tool call objects support dict-like .get() access
-        if tool_call.get("type") == "function":
+        if tool_call.get("type") in ("custom", "custom_tool_call"):
+          payload = tool_call.get("custom") or tool_call
+          yield CustomToolChunk(
+              id=tool_call.get("call_id") or tool_call.get("id"),
+              name=payload.get("name"),
+              input=payload.get("input"),
+              index=tool_call.get("index", idx),
+          ), finish_reason
+        elif tool_call.get("type") == "function":
           function_obj = tool_call.get("function")
           if not function_obj:
             continue
@@ -2850,6 +2894,15 @@ def _model_response_to_chunk(
 
           # Ignore empty chunks that don't carry any information.
           if not func_name and not func_args:
+            continue
+
+          if isinstance(func_name, str) and func_name in custom_tool_names:
+            yield CustomToolChunk(
+                id=tool_call_id,
+                name=func_name,
+                input=func_args,
+                index=func_index,
+            ), finish_reason
             continue
 
           yield FunctionChunk(
@@ -2919,6 +2972,8 @@ def _extract_grounding_metadata(
 
 def _model_response_to_generate_content_response(
     response: ModelResponse,
+    *,
+    custom_tool_names: frozenset[str] = frozenset(),
 ) -> LlmResponse:
   """Converts a litellm response to LlmResponse. Also adds usage metadata.
 
@@ -2952,6 +3007,7 @@ def _model_response_to_generate_content_response(
         message,
         model_version=response.model,
         thought_parts=thought_parts or None,
+        custom_tool_names=custom_tool_names,
     )
   else:
     # Create empty LlmResponse when message is None or empty
@@ -2960,6 +3016,12 @@ def _model_response_to_generate_content_response(
         model_version=response.model,
     )
 
+  if finish_reason == "length" and llm_response.content:
+    llm_response.content.parts = [
+        part
+        for part in llm_response.content.parts or []
+        if _custom_tool_input(part) is None
+    ]
   mapped_finish_reason = _map_finish_reason(finish_reason)
   if mapped_finish_reason and not _malformed_args_outrank_provider(
       response_finish_reason=llm_response.finish_reason,
@@ -2997,6 +3059,7 @@ def _message_to_generate_content_response(
     is_partial: bool = False,
     model_version: Optional[str] = None,
     thought_parts: Optional[List[types.Part]] = None,
+    custom_tool_names: frozenset[str] = frozenset(),
 ) -> LlmResponse:
   """Converts a litellm message to LlmResponse.
 
@@ -3025,7 +3088,34 @@ def _message_to_generate_content_response(
   malformed_tool_calls: list[tuple[str, int]] = []
   if tool_calls:
     for tool_call in tool_calls:
-      if tool_call.type == "function":
+      payload = tool_call.get("custom") or tool_call
+      function = tool_call.get("function")
+      native_custom = tool_call.get("type") in ("custom", "custom_tool_call")
+      declared_custom = bool(
+          function
+          and isinstance(function.get("name"), str)
+          and function.get("name") in custom_tool_names
+      )
+      if native_custom or declared_custom:
+        name = payload.get("name") if native_custom else function.get("name")
+        raw_input = (
+            payload.get("input") if native_custom else function.get("arguments")
+        )
+        if (
+            not isinstance(name, str)
+            or not name
+            or not isinstance(raw_input, str)
+        ):
+          malformed_tool_calls.append((name or "<unnamed>", 0))
+          continue
+        parts.append(
+            _custom_tool_call_part(
+                name=name,
+                input=raw_input,
+                call_id=tool_call.get("call_id") or tool_call.get("id"),
+            )
+        )
+      elif tool_call.type == "function":
         thought_signature = _extract_thought_signature_from_tool_call(tool_call)
         try:
           args = _parse_tool_call_arguments(
@@ -3368,6 +3458,12 @@ async def _get_completion_inputs(
         if dumped_tool:
           tools.append(dumped_tool)
     tools = tools or None
+
+  if llm_request.custom_tool_declarations:
+    tools = (tools or []) + [
+        declaration.model_dump(exclude_none=True)
+        for declaration in llm_request.custom_tool_declarations
+    ]
 
   # 3. Handle response format
   response_format: dict[str, Any] | None = None
@@ -3778,10 +3874,18 @@ class LiteLlm(BaseLlm):
         )
         provider = _get_provider_from_model(self.model)
 
+    native_custom_tools = bool(provider) and provider.lower() in {
+        "openai",
+        "chatgpt",
+        "azure",
+    }
+
     if is_gemini_model(self.model) and (
         not provider or provider.lower() != "vertex_ai"
     ):
-      return LlmCapabilities(output_schema_and_tools=False)
+      return LlmCapabilities(
+          output_schema_and_tools=False, custom_tools=native_custom_tools
+      )
 
     is_native_provider = (
         bool(provider) and provider.lower() in _NATIVE_SCHEMA_PROVIDERS
@@ -3790,7 +3894,9 @@ class LiteLlm(BaseLlm):
         (provider and _is_anthropic_route(provider, self.model))
         or ("claude" in stripped_model.lower())
     ):
-      return LlmCapabilities(output_schema_and_tools=False)
+      return LlmCapabilities(
+          output_schema_and_tools=False, custom_tools=native_custom_tools
+      )
 
     try:
       if bool(
@@ -3798,7 +3904,9 @@ class LiteLlm(BaseLlm):
               model=stripped_model, custom_llm_provider=provider
           )
       ):
-        return LlmCapabilities(output_schema_and_tools=True)
+        return LlmCapabilities(
+            output_schema_and_tools=True, custom_tools=native_custom_tools
+        )
     except Exception as e:
       logger.debug(
           "supports_response_schema failed for %s (provider=%s): %s",
@@ -3823,9 +3931,13 @@ class LiteLlm(BaseLlm):
             stripped_model,
             e,
         )
-        return LlmCapabilities(output_schema_and_tools=True)
+        return LlmCapabilities(
+            output_schema_and_tools=True, custom_tools=native_custom_tools
+        )
 
-    return LlmCapabilities(output_schema_and_tools=False)
+    return LlmCapabilities(
+        output_schema_and_tools=False, custom_tools=native_custom_tools
+    )
 
   async def generate_content_async(
       self, llm_request: LlmRequest, stream: bool = False
@@ -3933,6 +4045,10 @@ class LiteLlm(BaseLlm):
       if http_opts.extra_body is not None:
         completion_args["extra_body"] = http_opts.extra_body
 
+    custom_tool_names = frozenset(
+        declaration.name for declaration in llm_request.custom_tool_declarations
+    )
+
     if stream:
       # Accumulate into lists and join once: `+=` on a closure cell or a dict
       # item does not get CPython's in-place unicode concat, so it would copy
@@ -3961,11 +4077,31 @@ class LiteLlm(BaseLlm):
         # The finish reason cannot reveal a truncated call: LiteLLM
         # substitutes "stop" when a provider ends a stream without sending
         # one. Whether the arguments parse is the only evidence left.
-        tool_calls = []
+        tool_calls: list[
+            ChatCompletionMessageToolCall | _OutboundCustomToolCall
+        ] = []
         has_incomplete_tool_call_args = False
         for index, func_data in function_calls.items():
+          if func_data["type"] == "custom" and finish_reason == "length":
+            return LlmResponse(
+                error_code=types.FinishReason.MAX_TOKENS,
+                finish_reason=types.FinishReason.MAX_TOKENS,
+                error_message=(
+                    "Custom tool input was truncated while streaming."
+                ),
+                model_version=model_version,
+            )
           if func_data["id"]:
             args = "".join(func_data["args_parts"])
+            if func_data["type"] == "custom":
+              tool_calls.append(
+                  _OutboundCustomToolCall(
+                      type="custom",
+                      id=func_data["id"],
+                      custom={"name": func_data["name"], "input": args},
+                  )
+              )
+              continue
             tool_call_arguments: Any = args
             try:
               tool_call_arguments = _parse_tool_call_arguments(
@@ -4027,10 +4163,15 @@ class LiteLlm(BaseLlm):
           )
 
         llm_response = _message_to_generate_content_response(
-            ChatCompletionAssistantMessage(
-                role="assistant",
-                content="".join(text_parts),
-                tool_calls=tool_calls,
+            # LiteLLM's assistant TypedDict omits the native custom payload
+            # accepted by the Responses bridge; preserve this mixed wire list.
+            cast(
+                Message,
+                {
+                    "role": "assistant",
+                    "content": "".join(text_parts),
+                    "tool_calls": tool_calls,
+                },
             ),
             model_version=model_version,
             thought_parts=(
@@ -4103,69 +4244,112 @@ class LiteLlm(BaseLlm):
         part_grounding = _extract_grounding_metadata(part)
         if part_grounding:
           grounding_metadata = part_grounding
-        for chunk, finish_reason in _model_response_to_chunk(part):
+        for chunk, finish_reason in _model_response_to_chunk(
+            part, custom_tool_names=custom_tool_names
+        ):
           if finish_reason:
             last_finish_reason = finish_reason
-          if isinstance(chunk, FunctionChunk):
-            index = chunk.index or fallback_index
+          if isinstance(chunk, (FunctionChunk, CustomToolChunk)):
+            if isinstance(chunk, FunctionChunk) and not custom_tool_names:
+              # Preserve the existing workaround for function-only providers
+              # which report every sequential call at index zero.
+              index = chunk.index or fallback_index
+            else:
+              index = chunk.index if chunk.index is not None else fallback_index
             if index not in function_calls:
               function_calls[index] = {
                   "name": "",
                   "args_parts": [],
                   "id": None,
                   "thought_signature": None,
+                  "type": "function",
               }
-
-            if chunk.name:
-              function_calls[index]["name"] += chunk.name
-            if chunk.thought_signature:
-              function_calls[index][
-                  "thought_signature"
-              ] = chunk.thought_signature
-            if chunk.args:
-              args_parts = function_calls[index]["args_parts"]
-              args_parts.append(chunk.args)
-
-              # Detect args completion to advance fallback_index (workaround
-              # for improper chunk indexing) without O(N^2) re-parsing.
-              tracker = tool_call_trackers.setdefault(
-                  index, _BraceDepthTracker()
-              )
-              if tracker.feed(chunk.args):
-                try:
-                  json.loads("".join(args_parts))
-                  fallback_index += 1
-                except json.JSONDecodeError:
-                  pass
-
-            function_calls[index]["id"] = (
-                chunk.id or function_calls[index]["id"] or str(index)
+            data = function_calls[index]
+            is_custom = (
+                isinstance(chunk, CustomToolChunk)
+                or data["type"] == "custom"
+                or chunk.name in custom_tool_names
             )
-
-            partial_args = None
-            if chunk.args:
-              path_tracker = function_calls[index].setdefault(
-                  "path_tracker", streaming_utils._JsonPathTracker()
+            if is_custom:
+              data["type"] = "custom"
+              if chunk.name:
+                data["name"] += chunk.name
+              raw_input = (
+                  chunk.input
+                  if isinstance(chunk, CustomToolChunk)
+                  else chunk.args
               )
-              partial_args = path_tracker.handle_chunk(chunk.args)
+              if raw_input is not None:
+                data["args_parts"].append(raw_input)
+              data["id"] = chunk.id or data["id"] or str(index)
+              yield LlmResponse(
+                  partial=True,
+                  content=types.Content(
+                      role="model",
+                      parts=[
+                          _custom_tool_call_part(
+                              name=data["name"],
+                              input=raw_input or "",
+                              call_id=data["id"],
+                              will_continue=True,
+                          ),
+                      ],
+                  ),
+                  model_version=part.model,
+              )
+            else:
+              # CustomToolChunk always takes the raw-input branch above.
+              chunk = cast(FunctionChunk, chunk)
+              if chunk.name:
+                function_calls[index]["name"] += chunk.name
+              if chunk.thought_signature:
+                function_calls[index][
+                    "thought_signature"
+                ] = chunk.thought_signature
+              if chunk.args:
+                args_parts = function_calls[index]["args_parts"]
+                args_parts.append(chunk.args)
 
-            yield LlmResponse(
-                partial=True,
-                content=types.Content(
-                    role="model",
-                    parts=[
-                        types.Part(
-                            function_call=types.FunctionCall(
-                                id=function_calls[index]["id"],
-                                name=function_calls[index]["name"] or None,
-                                partial_args=partial_args or None,
-                                will_continue=True,
-                            )
-                        )
-                    ],
-                ),
-                model_version=part.model,
-            )
+                # Detect args completion to advance fallback_index (workaround
+                # for improper chunk indexing) without O(N^2) re-parsing.
+                tracker = tool_call_trackers.setdefault(
+                    index, _BraceDepthTracker()
+                )
+                if tracker.feed(chunk.args):
+                  try:
+                    json.loads("".join(args_parts))
+                    fallback_index += 1
+                  except json.JSONDecodeError:
+                    pass
+
+              function_calls[index]["id"] = (
+                  chunk.id or function_calls[index]["id"] or str(index)
+              )
+
+              partial_args = None
+              if chunk.args:
+                path_tracker = function_calls[index].setdefault(
+                    "path_tracker", streaming_utils._JsonPathTracker()
+                )
+                partial_args = path_tracker.handle_chunk(chunk.args)
+
+              yield LlmResponse(
+                  partial=True,
+                  content=types.Content(
+                      role="model",
+                      parts=[
+                          types.Part(
+                              function_call=types.FunctionCall(
+                                  id=function_calls[index]["id"],
+                                  name=function_calls[index]["name"] or None,
+                                  partial_args=partial_args or None,
+                                  will_continue=True,
+                              )
+                          )
+                      ],
+                  ),
+                  model_version=part.model,
+              )
           elif isinstance(chunk, TextChunk):
             if chunk.text:
               text_parts.append(chunk.text)
@@ -4287,7 +4471,9 @@ class LiteLlm(BaseLlm):
 
     else:
       response = await self.llm_client.acompletion(**completion_args)
-      yield _model_response_to_generate_content_response(response)
+      yield _model_response_to_generate_content_response(
+          response, custom_tool_names=custom_tool_names
+      )
 
   @classmethod
   @override
