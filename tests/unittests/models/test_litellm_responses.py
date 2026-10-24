@@ -205,7 +205,6 @@ async def test_all_native_outputs_survive_json_and_a_fresh_model_in_order(
   assert client.requests[0]['include'] == ['reasoning.encrypted_content']
   assert client.requests[0]['reasoning'] == {
       'effort': 'medium',
-      'summary': 'auto',
   }
   assert client.requests[0]['store'] is False
   assert client.requests[0]['instructions'] == 'Stable application policy.'
@@ -1064,3 +1063,76 @@ async def test_search_keeps_declarations_fixed_and_executor_refuses_then_continu
   assert client.requests[0]['tools'] == client.requests[1]['tools']
   assert all(req['tool_choice'] == 'auto' for req in client.requests)
   await runner.close()
+
+
+@pytest.mark.parametrize('stream', [False, True])
+async def test_streamed_reasoning_before_tool_replays_exactly_with_terminal_output(
+    stream,
+):
+  """Subscription SSE can return several encrypted items before one tool call."""
+  outputs = [reasoning('first'), reasoning('second'), call()]
+
+  async def chunks():
+    for index, item in enumerate(outputs):
+      yield {
+          'type': 'response.output_item.done',
+          'output_index': index,
+          'item': item,
+      }
+    yield {'type': 'response.completed', 'response': response(outputs)}
+
+  client = Client([chunks])
+  model = LiteLlm(model=MODEL, use_responses_api=True, llm_client=client)
+  generated = [
+      r async for r in model.generate_content_async(request(), stream=stream)
+  ]
+  restored = Event.model_validate_json(
+      Event(author='agent', content=generated[-1].content).model_dump_json()
+  )
+  assert (
+      restored.content.parts[0].part_metadata[NATIVE_RESPONSE_KEY]['output']
+      == outputs
+  )
+  fresh = Client([response([message()], 'next')])
+  continuation = request([
+      *request().contents,
+      restored.content,
+      types.Content(
+          role='user',
+          parts=[
+              types.Part(
+                  function_response=types.FunctionResponse(
+                      name='lookup', id='call_lookup', response={'value': 42}
+                  )
+              )
+          ],
+      ),
+  ])
+  fresh_model = LiteLlm(model=MODEL, use_responses_api=True, llm_client=fresh)
+  [r async for r in fresh_model.generate_content_async(continuation)]
+  assert fresh.requests[0]['input'][1:4] == outputs
+  assert fresh.requests[0]['store'] is False
+
+
+@pytest.mark.parametrize('include_thoughts', [None, False, True])
+async def test_reasoning_summary_is_requested_only_for_displayed_thoughts(
+    include_thoughts,
+):
+  client = Client([response([message()])])
+  model = LiteLlm(
+      model=MODEL,
+      use_responses_api=True,
+      llm_client=client,
+      reasoning_effort='medium',
+  )
+  req = request()
+  if include_thoughts is not None:
+    req.config.thinking_config = types.ThinkingConfig(
+        include_thoughts=include_thoughts
+    )
+  [r async for r in model.generate_content_async(req)]
+  expected = {'effort': 'medium'}
+  if include_thoughts:
+    expected['summary'] = 'auto'
+  assert client.requests[0]['reasoning'] == expected
+  assert client.requests[0]['include'] == ['reasoning.encrypted_content']

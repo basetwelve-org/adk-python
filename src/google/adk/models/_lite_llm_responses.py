@@ -111,7 +111,6 @@ def _reasoning(options: dict, request: LlmRequest) -> None:
   effort = options.pop('reasoning_effort', None)
   if effort is not None:
     reasoning['effort'] = effort
-  reasoning.setdefault('summary', 'auto')
   thinking = request.config.thinking_config
   if thinking:
     budget = thinking.thinking_budget
