@@ -42,6 +42,8 @@ if TYPE_CHECKING:
   from ..models.llm_request import LlmRequest
   from .tool_configs import ToolArgsConfig
 
+from ._tool_namespace import dispatch_name
+from ._tool_namespace import ToolNamespace
 # Re-exported for backward compatibility: existing code imports ToolContext
 # from this module and annotates tool methods with base_tool.ToolContext, which
 # ADK resolves at runtime via get_type_hints(), so it must be importable here.
@@ -57,6 +59,18 @@ def _is_callable_annotation(annotation: object) -> bool:
 
 class BaseTool(ABC):
   """The base class for all tools."""
+
+  namespace: ToolNamespace | None = None
+  """Native Responses namespace; requires the native Responses route."""
+
+  defer_loading: bool = False
+  """Load this declaration through hosted native tool search."""
+
+  @property
+  def dispatch_name(self) -> str:
+    return dispatch_name(
+        self.namespace.name if self.namespace else None, self.name
+    )
 
   name: str
   """The name of the tool."""
@@ -128,6 +142,8 @@ class BaseTool(ABC):
       self,
       *,
       name: str,
+      namespace: ToolNamespace | None = None,
+      defer_loading: bool = False,
       description: str,
       is_long_running: bool = False,
       custom_metadata: Optional[dict[str, Any]] = None,
@@ -135,6 +151,8 @@ class BaseTool(ABC):
       response_scheduling: Optional[types.FunctionResponseScheduling] = None,
   ):
     self.name = name
+    self.namespace = namespace
+    self.defer_loading = defer_loading
     self.description = description
     self.is_long_running = is_long_running
     self._defers_response = False

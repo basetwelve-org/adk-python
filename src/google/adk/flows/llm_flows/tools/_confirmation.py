@@ -360,7 +360,7 @@ class _RequestConfirmationLlmRequestProcessor(BaseLlmRequestProcessor):
     tools_dict = {}
     if agent is not None and hasattr(agent, "canonical_tools"):
       tools_dict = {
-          tool.name: tool
+          tool.dispatch_name: tool
           for tool in await cast("LlmAgent", agent).canonical_tools(
               ReadonlyContext(invocation_context)
           )

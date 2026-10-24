@@ -91,6 +91,7 @@ class _RequestSnapshot(NamedTuple):
   config: types.GenerateContentConfig
   live_connect_config: types.LiveConnectConfig
   private: dict[str, Any]
+  execution_allowed_tool_names: frozenset[str] | None
 
   @classmethod
   def of(cls, llm_request: LlmRequest) -> _RequestSnapshot:
@@ -102,6 +103,7 @@ class _RequestSnapshot(NamedTuple):
     so they are left out along with everything else outside these four.
     """
     return cls(
+        execution_allowed_tool_names=llm_request.execution_allowed_tool_names,
         contents=[
             content.model_copy(deep=True) for content in llm_request.contents
         ],
@@ -123,6 +125,7 @@ class _RequestSnapshot(NamedTuple):
       llm_request: The request to roll back. The caller holds it, so it has to
         be the same object afterwards, not a replacement.
     """
+    llm_request.execution_allowed_tool_names = self.execution_allowed_tool_names
     llm_request.contents = self.contents
     llm_request.config = self.config
     llm_request.live_connect_config = self.live_connect_config

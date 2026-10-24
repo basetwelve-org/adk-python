@@ -436,8 +436,15 @@ class McpTool(BaseAuthenticatedTool):
         function_declarations = getattr(tool, "function_declarations", None)
         if function_declarations:
           for i in range(len(function_declarations) - 1, -1, -1):
-            if getattr(function_declarations[i], "name", None) == self.name:
-              function_declarations[i] = self._build_fenced_declaration()
+            if (
+                getattr(function_declarations[i], "name", None)
+                == self.dispatch_name
+            ):
+              function_declarations[
+                  i
+              ] = self._build_fenced_declaration().model_copy(
+                  update={"name": self.dispatch_name}
+              )
               replaced = True
               break
         if replaced:

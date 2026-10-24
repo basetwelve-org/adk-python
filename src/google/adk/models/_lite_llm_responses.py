@@ -26,6 +26,7 @@ from google.genai import types
 
 from ..tools._custom_tool import _custom_tool_call_part
 from ..tools._custom_tool import _custom_tool_input
+from ..tools._tool_namespace import dispatch_name
 from .interactions_utils import extract_system_instruction
 from .llm_request import LlmRequest
 from .llm_response import LlmResponse
@@ -136,8 +137,30 @@ def _reasoning(options: dict, request: LlmRequest) -> None:
 def _tool_choice(request: LlmRequest, tools: list[dict], default: Any) -> Any:
   config = request.config.tool_config
   calling = config.function_calling_config if config else None
+  request.execution_allowed_tool_names = None
   if not tools:
     return None
+  searchable = any(tool['type'] == 'tool_search' for tool in tools)
+  if searchable:
+    # Subscription Responses rejects namespace/tool_search allowed_tools entries.
+    # Keep the model's surface and cached prefix fixed; enforce at execution.
+    if default == 'none':
+      request.execution_allowed_tool_names = frozenset()
+    elif calling and calling.allowed_function_names:
+      allowed = set()
+      for name in calling.allowed_function_names:
+        matches = [
+            key
+            for key, tool in request.tools_dict.items()
+            if key == name or tool.name == name
+        ]
+        if not matches:
+          raise ValueError(
+              'allowed_function_names must name declared Responses tools'
+          )
+        allowed.update(matches)
+      request.execution_allowed_tool_names = frozenset(allowed)
+    return 'auto'
   if not calling or not calling.allowed_function_names or default == 'none':
     return default
   by_name = {tool.get('name'): tool.get('type') for tool in tools}
@@ -151,6 +174,42 @@ def _tool_choice(request: LlmRequest, tools: list[dict], default: Any) -> Any:
       'mode': 'required' if default == 'required' else 'auto',
       'tools': [{'type': by_name[name], 'name': name} for name in names],
   }
+
+
+def _searchable_tools(request: LlmRequest, tools: list[dict]) -> list[dict]:
+  """Group native declarations without exposing deferred schemas up front."""
+  result = []
+  namespaces = {}
+  deferred = False
+  for declaration in tools:
+    tool = request.tools_dict.get(declaration.get('name'))
+    if tool is None:
+      result.append(declaration)
+      continue
+    declaration = copy.deepcopy(declaration)
+    declaration['name'] = tool.name
+    if tool.defer_loading:
+      declaration['defer_loading'] = True
+      deferred = True
+    if tool.namespace is None:
+      result.append(declaration)
+      continue
+    namespace = namespaces.get(tool.namespace.name)
+    if namespace is None:
+      namespace = {
+          'type': 'namespace',
+          'name': tool.namespace.name,
+          'description': tool.namespace.description,
+          'tools': [],
+      }
+      namespaces[tool.namespace.name] = namespace
+      result.append(namespace)
+    elif namespace['description'] != tool.namespace.description:
+      raise ValueError('Conflicting tool namespace descriptions')
+    namespace['tools'].append(declaration)
+  if deferred:
+    result.append({'type': 'tool_search'})
+  return result
 
 
 async def _request_options(
@@ -186,7 +245,9 @@ async def _request_options(
       custom_llm_provider=conversion['custom_llm_provider'],
   )
   bridge = LiteLLMResponsesTransformationHandler()
-  tools = bridge._convert_tools_to_responses_format(tools or [])
+  tools = _searchable_tools(
+      request, bridge._convert_tools_to_responses_format(tools or [])
+  )
   options.update(
       model=effective_model,
       input=await _input_items(
@@ -289,7 +350,7 @@ def _response(raw: dict, model: str, include_thoughts: bool) -> LlmResponse:
         if kind == 'custom_tool_call':
           parts.append(
               _custom_tool_call_part(
-                  name=item['name'],
+                  name=dispatch_name(item.get('namespace'), item['name']),
                   input=item['input'],
                   call_id=item['call_id'],
               )
@@ -301,7 +362,9 @@ def _response(raw: dict, model: str, include_thoughts: bool) -> LlmResponse:
           parts.append(
               types.Part(
                   function_call=types.FunctionCall(
-                      name=item['name'], args=args, id=item['call_id']
+                      name=dispatch_name(item.get('namespace'), item['name']),
+                      args=args,
+                      id=item['call_id'],
                   )
               )
           )

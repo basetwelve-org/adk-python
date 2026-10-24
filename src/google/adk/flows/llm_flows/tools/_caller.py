@@ -296,7 +296,7 @@ def _build_function_response_content(
     function_result = {'result': function_result}
 
   part_function_response = types.Part.from_function_response(
-      name=tool.name,
+      name=tool.dispatch_name,
       response=function_result,
       parts=function_response_parts,
   )
@@ -415,6 +415,7 @@ class _PreparedFunctionCall:
   function_args: dict[str, Any]
   contextvars_snapshot: contextvars.Context
   tools_dict: dict[str, BaseTool] = dataclasses.field(default_factory=dict)
+  execution_allowed: bool = True
   tool_lookup_error: Optional[Exception] = None
 
 
@@ -504,6 +505,23 @@ async def _execute_single_prepared_call(
     5. Building the final FunctionResponse Event to be returned.
     """
     nonlocal function_response, detected_error_type, response_source
+
+    if not prepared_call.execution_allowed:
+      return _build_response_event(
+          tool,
+          {
+              'error': {
+                  'code': 'TOOL_NOT_ALLOWED_THIS_TURN',
+                  'message': (
+                      f'{prepared_call.function_call.name} is unavailable for'
+                      ' this turn. Continue with the permitted tools.'
+                  ),
+                  'retryable': True,
+              }
+          },
+          tool_context,
+          invocation_context,
+      )
 
     # Step 1: Check if plugin before_tool_callback overrides the function
     # response.

@@ -1423,6 +1423,7 @@ async def test_tool_answering_the_hook_with_a_non_bool_is_run():
   """
   tool = create_autospec(BaseTool, instance=True)
   tool.name = "mocked_tool"
+  tool.dispatch_name = tool.name
   tool.description = "Answers the hook with a mock."
   tool.run_async.return_value = {"status": "ran"}
   agent = LlmAgent(name="test_agent")

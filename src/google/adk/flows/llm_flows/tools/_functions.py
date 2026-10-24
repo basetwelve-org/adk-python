@@ -253,6 +253,7 @@ async def handle_function_call_list_async(
     tools_dict: dict[str, BaseTool],
     filters: Optional[set[str]] = None,
     tool_confirmation_dict: Optional[dict[str, ToolConfirmation]] = None,
+    execution_allowed_tool_names: Optional[frozenset[str]] = None,
 ) -> Optional[Event]:
   """Calls the functions and returns the function response event."""
   return await _handle_function_call_list_async(
@@ -261,6 +262,7 @@ async def handle_function_call_list_async(
       tools_dict=tools_dict,
       filters=filters,
       tool_confirmation_dict=tool_confirmation_dict,
+      execution_allowed_tool_names=execution_allowed_tool_names,
   )
 
 
@@ -270,6 +272,7 @@ async def handle_function_calls_async(
     tools_dict: dict[str, BaseTool],
     filters: Optional[set[str]] = None,
     tool_confirmation_dict: Optional[dict[str, ToolConfirmation]] = None,
+    execution_allowed_tool_names: Optional[frozenset[str]] = None,
 ) -> Optional[Event]:
   """Calls the functions and returns the function response event."""
   from .. import functions
@@ -281,6 +284,11 @@ async def handle_function_calls_async(
       tools_dict,
       filters,
       tool_confirmation_dict,
+      **(
+          {'execution_allowed_tool_names': execution_allowed_tool_names}
+          if execution_allowed_tool_names is not None
+          else {}
+      ),
   )
 
 

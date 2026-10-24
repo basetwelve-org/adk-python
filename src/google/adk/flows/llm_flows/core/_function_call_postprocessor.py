@@ -75,7 +75,18 @@ async def postprocess_handle_function_calls_async(
 ) -> AsyncGenerator[Event, None]:
   """Executes function calls and emits auth, confirmation, schema, and transfer events."""
   if function_response_event := await functions.handle_function_calls_async(
-      invocation_context, function_call_event, llm_request.tools_dict
+      invocation_context,
+      function_call_event,
+      llm_request.tools_dict,
+      **(
+          {
+              'execution_allowed_tool_names': (
+                  llm_request.execution_allowed_tool_names
+              )
+          }
+          if llm_request.execution_allowed_tool_names is not None
+          else {}
+      ),
   ):
     auth_event = functions.generate_auth_event(
         invocation_context, function_response_event

@@ -39,6 +39,7 @@ from ..utils._sync_runner import _SYNC_CALLABLE_RUNNER
 from ..utils._sync_runner import _use_sync_callable_runner as _use_sync_callable_runner
 from ..utils.variant_utils import GoogleLLMVariant
 from ._automatic_function_calling_util import build_function_declaration
+from ._tool_namespace import ToolNamespace
 from .base_tool import BaseTool
 from .tool_context import ToolContext
 
@@ -84,6 +85,8 @@ class FunctionTool(BaseTool):
       func: Callable[..., Any],
       *,
       require_confirmation: Union[bool, Callable[..., bool]] = False,
+      namespace: ToolNamespace | None = None,
+      defer_loading: bool = False,
   ):
     """Initializes the FunctionTool. Extracts metadata from a callable object.
 
@@ -98,7 +101,12 @@ class FunctionTool(BaseTool):
     name = _function_tool_declarations.get_callable_name(func)
     doc = self._spec.doc
 
-    super().__init__(name=name, description=doc)
+    super().__init__(
+        name=name,
+        description=doc,
+        namespace=namespace,
+        defer_loading=defer_loading,
+    )
     self.func = func
     # Detect context parameter by type annotation, fallback to 'tool_context' name
     self._context_param_name = self._spec.context_param_name or "tool_context"

@@ -26,6 +26,7 @@ if TYPE_CHECKING:
   from ._custom_tool_declaration import CustomToolTextFormat
   from ._remote_mcp_server import RemoteMcpServer
   from ._request_input_tool import request_input
+  from ._tool_namespace import ToolNamespace
   from .agent_tool import AgentTool
   from .api_registry import ApiRegistry
   from .apihub_tool.apihub_toolset import APIHubToolset
@@ -57,6 +58,7 @@ if TYPE_CHECKING:
 # party dependencies, please feel free to import it eagerly at the top of this
 # file.
 _LAZY_MAPPING = {
+    'ToolNamespace': ('._tool_namespace', 'ToolNamespace'),
     'CustomToolTextFormat': (
         '._custom_tool_declaration',
         'CustomToolTextFormat',

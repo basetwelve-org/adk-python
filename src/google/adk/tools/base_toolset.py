@@ -63,6 +63,9 @@ class ToolPredicate(Protocol):
 SelfToolset = TypeVar("SelfToolset", bound="BaseToolset")
 
 
+from ._tool_namespace import ToolNamespace
+
+
 class BaseToolset(ABC):
   """Base class for toolset.
 
@@ -74,6 +77,8 @@ class BaseToolset(ABC):
       *,
       tool_filter: Optional[Union[ToolPredicate, List[str]]] = None,
       tool_name_prefix: Optional[str] = None,
+      namespace: ToolNamespace | None = None,
+      defer_loading: bool = False,
   ):
     """Initialize the toolset.
 
@@ -81,6 +86,8 @@ class BaseToolset(ABC):
       tool_filter: Filter to apply to tools.
       tool_name_prefix: The prefix to prepend to the names of the tools returned by the toolset.
     """
+    self.namespace = namespace
+    self.defer_loading = defer_loading
     self.tool_filter = tool_filter
     self.tool_name_prefix = tool_name_prefix
     self._cached_invocation_id: Optional[str] = None
@@ -145,7 +152,11 @@ class BaseToolset(ABC):
 
     tools = await self.get_tools(readonly_context)
 
-    if not self.tool_name_prefix:
+    if (
+        not self.tool_name_prefix
+        and self.namespace is None
+        and not self.defer_loading
+    ):
       self._cached_invocation_id = invocation_id
       self._cached_prefixed_tools = tools
       return tools
@@ -158,8 +169,11 @@ class BaseToolset(ABC):
       # Create a shallow copy of the tool
       tool_copy = copy.copy(tool)
 
+      tool_copy.namespace = self.namespace or tool.namespace
+      tool_copy.defer_loading = self.defer_loading or tool.defer_loading
+
       # Apply prefix to the copied tool
-      prefixed_name = f"{prefix}_{tool.name}"
+      prefixed_name = f"{prefix}_{tool.name}" if prefix else tool.name
       tool_copy.name = prefixed_name
 
       # Also update the function declaration name if the tool has one

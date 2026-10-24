@@ -3976,6 +3976,13 @@ class LiteLlm(BaseLlm):
       async for response in generate_content(self, llm_request, stream=stream):
         yield response
       return
+    if any(
+        tool.namespace or tool.defer_loading
+        for tool in llm_request.tools_dict.values()
+    ):
+      raise ValueError(
+          "Tool namespaces and deferred loading require use_responses_api=True"
+      )
     if logger.isEnabledFor(logging.DEBUG):
       logger.debug(_build_request_log(llm_request))
 

@@ -123,6 +123,8 @@ This directory contains specific developer guides for the ADK Python implementat
 * [TelemetryConfig](telemetry/telemetry_config/index.md) - What ADK puts in its OpenTelemetry traces, and whether the text of prompts and replies is copied onto exported spans.
 
 ### Tools
+* [CustomTool](tools/custom_tool/index.md) - Native freeform custom tool declarations and raw inputs.
+* [ToolNamespace](tools/tool_namespace.md) - Native Responses namespaces, deferred loading and executor restrictions.
 * [FunctionTool](tools/function_tool/index.md) - Wrapping Python functions and generators as agent tools with argument validation, progress streaming, and confirmation.
 * [ModelConsultTool and ModelConsultContextConfig](tools/model_consult/model_consult_tool/index.md) - Escalating hard decisions mid-generation to a stronger advisor model, with per-turn and session budgets.
 * [Node as tool](tools/node_tool/index.md) - Exposing workflows and deterministic nodes as agent tools with isolated runtime branching and resume support.

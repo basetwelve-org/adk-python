@@ -837,3 +837,230 @@ async def test_compaction_and_message_replay_when_terminal_output_is_empty(
   )
   [r async for r in fresh_model.generate_content_async(continuation)]
   assert fresh.requests[0]['input'][:2] == outputs
+
+
+@pytest.mark.parametrize('stream', [False, True])
+@pytest.mark.asyncio
+async def test_deferred_namespaces_search_replay_and_duplicate_name_dispatch(
+    stream, tmp_path
+):
+  from google.adk.tools import ToolNamespace
+
+  def value(key: str) -> dict:
+    return {'source': 'fleet', 'key': key}
+
+  def other(key: str) -> dict:
+    return {'source': 'billing', 'key': key}
+
+  fleet = FunctionTool(
+      value,
+      namespace=ToolNamespace(name='fleet', description='Read vehicles.'),
+      defer_loading=True,
+  )
+  billing = FunctionTool(
+      other,
+      namespace=ToolNamespace(name='billing', description='Read invoices.'),
+      defer_loading=True,
+  )
+  billing.name = fleet.name
+  search = [
+      {
+          'type': 'tool_search_call',
+          'id': 'tsc',
+          'execution': 'server',
+          'arguments': {'paths': ['fleet']},
+          'status': 'completed',
+      },
+      {
+          'type': 'tool_search_output',
+          'id': 'tso',
+          'execution': 'server',
+          'tools': [{
+              'type': 'namespace',
+              'name': 'fleet',
+              'description': 'Read vehicles.',
+              'tools': [{
+                  'type': 'function',
+                  'name': 'value',
+                  'defer_loading': True,
+                  'parameters': {
+                      'type': 'object',
+                      'properties': {'key': {'type': 'string'}},
+                      'required': ['key'],
+                      'additionalProperties': False,
+                  },
+              }],
+          }],
+          'status': 'completed',
+      },
+      {**call('value', 'fleet_call'), 'namespace': 'fleet'},
+      {**call('value', 'billing_call'), 'namespace': 'billing'},
+  ]
+
+  async def chunks():
+    for index, item in enumerate(search):
+      yield {
+          'type': 'response.output_item.done',
+          'output_index': index,
+          'item': copy.deepcopy(item),
+      }
+    yield {
+        'type': 'response.completed',
+        'response': response([], 'search-response'),
+    }
+
+  client = Client([
+      chunks if stream else response(search, 'search-response'),
+      response([message()], 'answer'),
+  ])
+  model = LiteLlm(model=MODEL, use_responses_api=True, llm_client=client)
+  root = LlmAgent(name='agent', model=model, tools=[fleet, billing])
+  sessions = DatabaseSessionService(
+      db_url=f'sqlite+aiosqlite:///{tmp_path / "namespace.db"}'
+  )
+  await sessions.create_session(
+      app_name='native', user_id='user', session_id='chat'
+  )
+  runner = Runner(
+      app=App(name='native', root_agent=root), session_service=sessions
+  )
+  events = [
+      e
+      async for e in runner.run_async(
+          user_id='user',
+          session_id='chat',
+          new_message=types.Content(
+              role='user', parts=[types.Part(text='Read records.')]
+          ),
+      )
+  ]
+  sent = client.requests[0]['tools']
+  assert [t['type'] for t in sent] == ['namespace', 'namespace', 'tool_search']
+  assert [t['name'] for t in sent[:-1]] == ['fleet', 'billing']
+  assert all(
+      t['tools'][0]['name'] == 'value' and t['tools'][0]['defer_loading']
+      for t in sent[:-1]
+  )
+  results = [
+      p.function_response.response
+      for e in events
+      if e.content
+      for p in e.content.parts or []
+      if p.function_response
+  ]
+  assert {r['source'] for r in results} == {'fleet', 'billing'}
+  assert client.requests[1]['input'][1 : 1 + len(search)] == search
+  stored = await sessions.get_session(
+      app_name='native', user_id='user', session_id='chat'
+  )
+  restored = [
+      Event.model_validate_json(e.model_dump_json()) for e in stored.events
+  ]
+  assert any(
+      p.part_metadata.get(NATIVE_RESPONSE_KEY, {}).get('output') == search
+      for e in restored
+      if e.content
+      for p in e.content.parts or []
+      if p.part_metadata
+  )
+  await runner.close()
+  await sessions.close()
+
+
+@pytest.mark.asyncio
+async def test_namespaced_allowed_tools_and_toolset_metadata_do_not_mutate_shared_tools():
+  from google.adk.tools import ToolNamespace
+  from google.adk.tools.base_toolset import BaseToolset
+
+  original = FunctionTool(lookup)
+
+  class Reads(BaseToolset):
+
+    async def get_tools(self, readonly_context=None):
+      return [original]
+
+  toolset = Reads(
+      namespace=ToolNamespace(name='records', description='Read records.'),
+      defer_loading=True,
+  )
+  views = await toolset.get_tools_with_prefix()
+  assert original.namespace is None and not original.defer_loading
+  assert views[0].namespace.name == 'records' and views[0].defer_loading
+  req = LlmRequest(model=MODEL, contents=request().contents)
+  req.append_tools(views)
+  req.config.tool_config = types.ToolConfig(
+      function_calling_config=types.FunctionCallingConfig(
+          mode='ANY', allowed_function_names=['records.lookup']
+      )
+  )
+  client = Client([response([message()])])
+  model = LiteLlm(model=MODEL, use_responses_api=True, llm_client=client)
+  _ = [r async for r in model.generate_content_async(req)]
+  assert client.requests[0]['tool_choice'] == 'auto'
+  assert req.execution_allowed_tool_names == frozenset({'records.lookup'})
+  assert list(req.tools_dict) == ['records.lookup']
+
+
+@pytest.mark.asyncio
+async def test_search_keeps_declarations_fixed_and_executor_refuses_then_continues():
+  from google.adk.sessions import InMemorySessionService
+  from google.adk.tools import ToolNamespace
+
+  ran = []
+
+  def forbidden(key: str):
+    ran.append(key)
+    return {'value': 'must not run'}
+
+  deferred = FunctionTool(
+      forbidden,
+      namespace=ToolNamespace(name='records', description='Read records.'),
+      defer_loading=True,
+  )
+  client = Client([
+      response([{**call('forbidden'), 'namespace': 'records'}], 'refused'),
+      response([message()], 'continued'),
+  ])
+  model = LiteLlm(model=MODEL, use_responses_api=True, llm_client=client)
+  root = LlmAgent(
+      name='agent',
+      model=model,
+      tools=[deferred, FunctionTool(lookup)],
+      generate_content_config=types.GenerateContentConfig(
+          tool_config=types.ToolConfig(
+              function_calling_config=types.FunctionCallingConfig(
+                  allowed_function_names=['lookup']
+              )
+          )
+      ),
+  )
+  sessions = InMemorySessionService()
+  await sessions.create_session(
+      app_name='native', user_id='user', session_id='chat'
+  )
+  runner = Runner(
+      app=App(name='native', root_agent=root), session_service=sessions
+  )
+  events = [
+      e
+      async for e in runner.run_async(
+          user_id='user',
+          session_id='chat',
+          new_message=types.Content(
+              role='user', parts=[types.Part(text='Read records.')]
+          ),
+      )
+  ]
+  assert not ran
+  results = [
+      p.function_response.response
+      for e in events
+      if e.content
+      for p in e.content.parts or []
+      if p.function_response
+  ]
+  assert results[0]['error']['code'] == 'TOOL_NOT_ALLOWED_THIS_TURN'
+  assert len(client.requests) == 2
+  assert client.requests[0]['tools'] == client.requests[1]['tools']
+  assert all(req['tool_choice'] == 'auto' for req in client.requests)
+  await runner.close()

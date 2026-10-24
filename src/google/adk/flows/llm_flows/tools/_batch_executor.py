@@ -305,6 +305,7 @@ async def handle_function_call_list_async(
     tools_dict: dict[str, BaseTool],
     filters: Optional[set[str]] = None,
     tool_confirmation_dict: Optional[dict[str, ToolConfirmation]] = None,
+    execution_allowed_tool_names: Optional[frozenset[str]] = None,
 ) -> Optional[Event]:
   """Calls the functions and returns the function response event."""
   agent = _as_llm_agent(invocation_context)
@@ -316,6 +317,11 @@ async def handle_function_call_list_async(
       filters=filters,
       tool_confirmation_dict=tool_confirmation_dict,
   )
+  if execution_allowed_tool_names is not None:
+    for prepared in prepared_calls:
+      prepared.execution_allowed = (
+          prepared.function_call.name in execution_allowed_tool_names
+      )
   return await _execute_prepared_function_calls_async(
       invocation_context, prepared_calls, agent
   )

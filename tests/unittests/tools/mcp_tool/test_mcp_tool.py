@@ -134,8 +134,10 @@ class TestMCPToolLegacy:
         _fencing.UNTRUSTED_TOOL_DESCRIPTION_BEGIN not in declaration.description
     )
 
+  @pytest.mark.parametrize("namespace", [None, "records"])
   async def test_process_llm_request_fences_a_malicious_server_description(
       self,
+      namespace,
   ):
     """A compromised MCP server's tool description must reach the model
     with markers, not verbatim, when processed for an LLM request.
@@ -152,6 +154,13 @@ class TestMCPToolLegacy:
         mcp_session_manager=self.mock_session_manager,
     )
 
+    if namespace:
+      from google.adk.tools import ToolNamespace
+
+      tool.namespace = ToolNamespace(
+          name=namespace, description="Read records."
+      )
+      tool.defer_loading = True
     llm_request = LlmRequest()
     mock_tool_context = Mock(spec=ToolContext)
     await tool.process_llm_request(
@@ -159,6 +168,7 @@ class TestMCPToolLegacy:
     )
 
     decl = llm_request.config.tools[0].function_declarations[0]
+    assert decl.name == tool.dispatch_name
     assert injected in decl.description
     assert _fencing.UNTRUSTED_TOOL_DESCRIPTION_BEGIN in decl.description
     assert _fencing.UNTRUSTED_TOOL_DESCRIPTION_END in decl.description

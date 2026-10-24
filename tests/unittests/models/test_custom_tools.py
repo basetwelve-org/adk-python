@@ -33,6 +33,8 @@ from google.adk.tools import FunctionTool
 from google.genai import types
 import litellm
 from litellm import ModelResponse
+from litellm.types.utils import ChatCompletionDeltaToolCall
+from litellm.types.utils import ChatCompletionMessageToolCall
 from litellm.types.utils import ModelResponseStream
 from pydantic import ValidationError
 import pytest
@@ -80,7 +82,12 @@ def response(calls, finish='tool_calls'):
           'message': {
               'role': 'assistant',
               'content': None,
-              'tool_calls': calls,
+              'tool_calls': [
+                  ChatCompletionMessageToolCall.model_construct(**call)
+                  if call.get('type') == 'custom'
+                  else call
+                  for call in calls
+              ],
           },
       }],
   )
@@ -231,7 +238,13 @@ class Client(LiteLLMClient):
             model='gpt-6-luna',
             choices=[{
                 'index': 0,
-                'delta': {'tool_calls': [chunk]},
+                'delta': {
+                    'tool_calls': [
+                        ChatCompletionDeltaToolCall.model_construct(**chunk)
+                        if chunk.get('type') == 'custom'
+                        else chunk
+                    ]
+                },
                 'finish_reason': None,
             }],
         )

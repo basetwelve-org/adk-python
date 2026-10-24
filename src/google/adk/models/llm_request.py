@@ -84,6 +84,10 @@ class LlmRequest(BaseModel):
   tools in generate_content_config should not be set.
   """
   tools_dict: dict[str, BaseTool] = Field(default_factory=dict, exclude=True)
+  execution_allowed_tool_names: frozenset[str] | None = Field(
+      default=None, exclude=True
+  )
+  """Per-request executor restriction for native deferred tool search."""
   """The tools dictionary."""
 
   custom_tool_declarations: list[CustomToolDeclaration] = Field(
@@ -313,10 +317,16 @@ class LlmRequest(BaseModel):
       declaration = None if custom_declaration else tool._get_declaration()
       if custom_declaration or declaration:
         if custom_declaration:
-          self.custom_tool_declarations.append(custom_declaration)
+          self.custom_tool_declarations.append(
+              custom_declaration.model_copy(update={"name": tool.dispatch_name})
+          )
         elif declaration is not None:
-          declarations.append(declaration)
-        if tool.name in self.tools_dict:
+          declarations.append(
+              declaration.model_copy(update={"name": tool.dispatch_name})
+              if tool.namespace
+              else declaration
+          )
+        if tool.dispatch_name in self.tools_dict:
           # Both declarations are still advertised to the model, but only one
           # tool can hold the name, so calls land on the survivor.
           logging.warning(
@@ -324,7 +334,7 @@ class LlmRequest(BaseModel):
               " shadowed and can no longer be called.",
               tool.name,
           )
-        self.tools_dict[tool.name] = tool
+        self.tools_dict[tool.dispatch_name] = tool
     if declarations:
       if self.config.tools is None:
         self.config.tools = []

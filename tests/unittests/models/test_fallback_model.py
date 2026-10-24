@@ -629,6 +629,7 @@ class _MutatingLlm(_FakeLlm):
         types.Content(role='user', parts=[types.Part(text=self.note)])
     )
     llm_request.config.temperature = 0.99
+    llm_request.execution_allowed_tool_names = frozenset({'changed'})
     async for response in super().generate_content_async(llm_request, stream):
       yield response
 
@@ -651,6 +652,7 @@ async def test_a_failed_model_does_not_leak_its_edits_to_the_next():
   assert backup.seen_contents == [c.text for c in _request().contents[0].parts]
   assert len(request.contents) == original_turns
   assert request.config.temperature is None
+  assert request.execution_allowed_tool_names is None
 
 
 @pytest.mark.asyncio
@@ -938,7 +940,12 @@ def test_every_public_field_is_accounted_for():
   # snapshot copies these fields by hand and reads neither at runtime;
   # test_a_failed_model_does_not_leak_its_edits_to_the_next is what proves a
   # restored field is actually restored.
-  restored = {'contents', 'config', 'live_connect_config'}
+  restored = {
+      'contents',
+      'config',
+      'live_connect_config',
+      'execution_allowed_tool_names',
+  }
   left = {
       'model',  # Reset to the delegate on every attempt.
       'tools_dict',  # Live tool objects, shared not copied.
