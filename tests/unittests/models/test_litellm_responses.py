@@ -781,3 +781,59 @@ async def test_native_runner_compaction_persists_summary_outputs_and_retains_rec
   assert metadata['output'] == summary_items
   await runner.close()
   await sessions.close()
+
+
+@pytest.mark.parametrize('stream', [False, True])
+async def test_compaction_and_message_replay_when_terminal_output_is_empty(
+    stream,
+):
+  """Native done items survive JSON and replay when terminal output is empty."""
+  outputs = [
+      {
+          'type': 'compaction',
+          'id': 'compact',
+          'encrypted_content': 'opaque-state',
+      },
+      message(text='Verified result is 84.'),
+  ]
+
+  async def chunks():
+    for index, item in enumerate(outputs):
+      yield {
+          'type': 'response.output_item.done',
+          'output_index': index,
+          'item': item,
+      }
+    yield {'type': 'response.completed', 'response': response([])}
+
+  client = Client([chunks])
+  model_name = 'chatgpt/gpt-6-luna'
+  model = LiteLlm(model=model_name, use_responses_api=True, llm_client=client)
+  results = [
+      r
+      async for r in model.generate_content_async(
+          request(model=model_name), stream=stream
+      )
+  ]
+  assert client.requests[0]['stream'] is True
+  assert results[-1].content.parts[0].text == 'Verified result is 84.'
+  restored = Event.model_validate_json(
+      Event(author='agent', content=results[-1].content).model_dump_json()
+  )
+  assert (
+      restored.content.parts[0].part_metadata[NATIVE_RESPONSE_KEY]['output']
+      == outputs
+  )
+  fresh = Client([response([message()], 'next')])
+  fresh_model = LiteLlm(
+      model=model_name, use_responses_api=True, llm_client=fresh
+  )
+  continuation = request(
+      [
+          restored.content,
+          types.Content(role='user', parts=[types.Part(text='Continue.')]),
+      ],
+      model=model_name,
+  )
+  [r async for r in fresh_model.generate_content_async(continuation)]
+  assert fresh.requests[0]['input'][:2] == outputs

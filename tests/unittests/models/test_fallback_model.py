@@ -942,6 +942,7 @@ def test_every_public_field_is_accounted_for():
   left = {
       'model',  # Reset to the delegate on every attempt.
       'tools_dict',  # Live tool objects, shared not copied.
+      'custom_tool_declarations',  # Declared before the call; models only read.
       'cache_config',  # Written by a request processor before the call.
       'cache_metadata',  # Written onto the response.
       'cacheable_contents_token_count',  # Response-side too.

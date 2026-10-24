@@ -192,7 +192,10 @@ async def _request_options(
       input=await _input_items(
           request.contents or [], effective_model, conversion
       ),
-      stream=stream,
+      # ChatGPT always streams on the wire. Consume its native iterator even
+      # for non-streaming ADK callers; SDK response reconstruction can omit
+      # output items when the terminal output array is empty.
+      stream=True if effective_model.startswith('chatgpt/') else stream,
   )
   instructions = extract_system_instruction(request.config)
   if instructions:
@@ -360,9 +363,12 @@ async def generate_content(
   response = await model.llm_client.aresponses(**options)
   if hasattr(response, '__aiter__'):
     terminal = None
+    completed_items = {}
     async for event in response:
       event = _dump(event)
-      if event.get('type') == 'response.output_text.delta' and stream:
+      if event.get('type') == 'response.output_item.done':
+        completed_items[event['output_index']] = event['item']
+      elif event.get('type') == 'response.output_text.delta' and stream:
         yield LlmResponse(
             content=types.Content(
                 role='model', parts=[types.Part(text=event['delta'])]
@@ -377,6 +383,11 @@ async def generate_content(
         terminal = event['response']
     if terminal is None:
       raise ValueError('Responses stream ended without a terminal response')
+    if not terminal.get('output') and completed_items:
+      terminal = {
+          **terminal,
+          'output': [item for _, item in sorted(completed_items.items())],
+      }
     response = terminal
   raw = _dump(response)
   thinking = request.config.thinking_config

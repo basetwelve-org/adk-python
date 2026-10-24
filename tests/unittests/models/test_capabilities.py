@@ -93,7 +93,10 @@ def test_model_copy_silently_ignores_an_unknown_capability():
   )
 
   assert not stale.output_schema_and_tools
-  assert stale.model_dump() == {'output_schema_and_tools': False}
+  assert stale.model_dump() == {
+      'output_schema_and_tools': False,
+      'custom_tools': False,
+  }
 
   with pytest.raises(pydantic.ValidationError):
     LlmCapabilities(
